@@ -29,10 +29,13 @@ function createAuthMiddleware(options = {}) {
     if (typeof devBypass === "function") {
       return devBypass(req);
     }
-    return (
-      process.env.NODE_ENV === "development" ||
-      process.env.DEV_MODE === "true"
-    );
+    const isDev = process.env.NODE_ENV === "development";
+    const devMode = process.env.DEV_MODE === "true";
+    if (process.env.NODE_ENV === "production" && devMode) {
+      logger.error("DEV_MODE=true v produkci — auth bypass je zakázán.");
+      return false;
+    }
+    return isDev && devMode;
   };
 
   const effectiveDevUser =
@@ -65,7 +68,7 @@ function createAuthMiddleware(options = {}) {
       return next();
     } catch (err) {
       logger.error("Auth error při ověřování tokenu:", err.message);
-      if (err.response && err.response.data) {
+      if (process.env.NODE_ENV !== "production" && err.response && err.response.data) {
         logger.error("Response data:", err.response.data);
       }
       return res.status(401).json({ error: "Invalid token" });
