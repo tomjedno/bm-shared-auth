@@ -6,8 +6,9 @@ const axios = require("axios");
  *
  * Options:
  *  - authApiUrl (string, povinné) – např. "http://auth-backend:5000"
- *  - devBypass (function | undefined) – funkce (req) => boolean, default:
- *        NODE_ENV === "development" || DEV_MODE === "true"
+ *  - devBypass (function | undefined) – doplňková podmínka pro bypass.
+ *        Bypass je vždy povolen pouze při NODE_ENV === "development".
+ *        Bez callbacku se navíc vyžaduje DEV_MODE === "true".
  *  - devUser (object | undefined) – co se dá do req.user v DEV režimu
  *  - timeoutMs (number | undefined) – timeout HTTP požadavku, default 5000
  *  - logger (object | undefined) – { info, error } – volitelné logování
@@ -25,17 +26,29 @@ function createAuthMiddleware(options = {}) {
     throw new Error("createAuthMiddleware: 'authApiUrl' je povinné.");
   }
 
+  let blockedBypassLogged = false;
+
   const isDevBypass = (req) => {
-    if (typeof devBypass === "function") {
-      return devBypass(req);
-    }
-    const isDev = process.env.NODE_ENV === "development";
-    const devMode = process.env.DEV_MODE === "true";
-    if (process.env.NODE_ENV === "production" && devMode) {
-      logger.error("DEV_MODE=true v produkci — auth bypass je zakázán.");
+    const nodeEnv = String(process.env.NODE_ENV || "").trim().toLowerCase();
+    const isDevelopment = nodeEnv === "development";
+    const devMode = String(process.env.DEV_MODE || "").trim().toLowerCase() === "true";
+
+    // Bezpečnostní hranice musí zůstat uvnitř shared knihovny. Vlastní callback
+    // proto nikdy nesmí zapnout bypass mimo explicitní development prostředí.
+    if (!isDevelopment) {
+      if (devMode && !blockedBypassLogged) {
+        logger.error(
+          `DEV_MODE=true při NODE_ENV=${nodeEnv || "<unset>"} — auth bypass je zakázán.`
+        );
+        blockedBypassLogged = true;
+      }
       return false;
     }
-    return isDev && devMode;
+
+    if (typeof devBypass === "function") {
+      return devBypass(req) === true;
+    }
+    return devMode;
   };
 
   const effectiveDevUser =
