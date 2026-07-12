@@ -133,3 +133,105 @@ describe("createAuthMiddleware dev bypass safety", () => {
     assert.deepEqual(result.req.user, { id: "remote-user", role: "user" });
   });
 });
+
+describe("createAuthMiddleware app authorization", () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = "production";
+    delete process.env.DEV_MODE;
+    axios.get = originalAxiosGet;
+  });
+
+  afterEach(() => {
+    axios.get = originalAxiosGet;
+    restoreEnv("NODE_ENV", originalEnv.NODE_ENV);
+    restoreEnv("DEV_MODE", originalEnv.DEV_MODE);
+  });
+
+  test("rejects an explicitly empty appAccessKey", () => {
+    assert.throws(
+      () => createAuthMiddleware({ authApiUrl: "http://auth.test", appAccessKey: "  " }),
+      /appAccessKey.*neprázdný string/
+    );
+  });
+
+  test("allows a user whose allowedApps contain the required app", async () => {
+    axios.get = async () => ({
+      data: { id: "allowed-user", allowedApps: ["calendar", "production"] },
+    });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+    });
+
+    const result = await runMiddleware(middleware, "Bearer valid-token");
+
+    assert.equal(result.nextCalled, true);
+    assert.equal(result.res.statusCode, 200);
+  });
+
+  test("keeps null allowedApps as access to all applications", async () => {
+    axios.get = async () => ({ data: { id: "admin-user", allowedApps: null } });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+    });
+
+    const result = await runMiddleware(middleware, "Bearer valid-token");
+
+    assert.equal(result.nextCalled, true);
+  });
+
+  test("denies a user whose allowedApps do not contain the required app", async () => {
+    axios.get = async () => ({ data: { id: "denied-user", allowedApps: ["production"] } });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+    });
+
+    const result = await runMiddleware(middleware, "Bearer valid-token");
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.res.statusCode, 403);
+    assert.deepEqual(result.res.body, { error: "Forbidden" });
+  });
+
+  test("fails closed for a malformed allowedApps claim", async () => {
+    axios.get = async () => ({ data: { id: "malformed-user", allowedApps: "calendar" } });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+    });
+
+    const result = await runMiddleware(middleware, "Bearer valid-token");
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.res.statusCode, 403);
+  });
+
+  test("accepts the legacy allowed_apps claim name", async () => {
+    axios.get = async () => ({ data: { id: "legacy-user", allowed_apps: ["calendar"] } });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+    });
+
+    const result = await runMiddleware(middleware, "Bearer valid-token");
+
+    assert.equal(result.nextCalled, true);
+  });
+
+  test("applies app authorization to a development bypass user", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.DEV_MODE = "true";
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "calendar",
+      devUser: { id: "dev-user", role: "admin", allowedApps: ["production"] },
+    });
+
+    const result = await runMiddleware(middleware);
+
+    assert.equal(result.nextCalled, false);
+    assert.equal(result.res.statusCode, 403);
+  });
+});

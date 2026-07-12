@@ -10,6 +10,7 @@ const axios = require("axios");
  *        Bypass je vždy povolen pouze při NODE_ENV === "development".
  *        Bez callbacku se navíc vyžaduje DEV_MODE === "true".
  *  - devUser (object | undefined) – co se dá do req.user v DEV režimu
+ *  - appAccessKey (string | undefined) – klíč aplikace vyžadovaný v allowedApps
  *  - timeoutMs (number | undefined) – timeout HTTP požadavku, default 5000
  *  - logger (object | undefined) – { info, error } – volitelné logování
  */
@@ -18,12 +19,19 @@ function createAuthMiddleware(options = {}) {
     authApiUrl,
     devBypass,
     devUser,
+    appAccessKey,
     timeoutMs = 5000,
     logger = console,
   } = options;
 
   if (!authApiUrl) {
     throw new Error("createAuthMiddleware: 'authApiUrl' je povinné.");
+  }
+
+  const hasAppAccessKey = Object.prototype.hasOwnProperty.call(options, "appAccessKey");
+  const requiredApp = typeof appAccessKey === "string" ? appAccessKey.trim() : "";
+  if (hasAppAccessKey && !requiredApp) {
+    throw new Error("createAuthMiddleware: 'appAccessKey' musí být neprázdný string.");
   }
 
   let blockedBypassLogged = false;
@@ -54,12 +62,25 @@ function createAuthMiddleware(options = {}) {
   const effectiveDevUser =
     devUser || { id: "dev-user", role: "admin", status: "active" };
 
+  const continueIfAppAllowed = (req, res, next) => {
+    if (!requiredApp) return next();
+
+    const allowedApps = req.user?.allowedApps ?? req.user?.allowed_apps;
+    if (allowedApps == null) return next();
+
+    // Podepsaný claim s neočekávaným typem nesmí omylem znamenat plný přístup.
+    if (!Array.isArray(allowedApps) || !allowedApps.includes(requiredApp)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+    return next();
+  };
+
   return async function authMiddleware(req, res, next) {
     try {
       // 1) DEV bypass
       if (isDevBypass(req)) {
         req.user = effectiveDevUser;
-        return next();
+        return continueIfAppAllowed(req, res, next);
       }
 
       // 2) Token z hlavičky
@@ -78,7 +99,7 @@ function createAuthMiddleware(options = {}) {
 
       // očekáváme, že auth-app vrací payload usera v body
       req.user = response.data;
-      return next();
+      return continueIfAppAllowed(req, res, next);
     } catch (err) {
       logger.error("Auth error při ověřování tokenu:", err.message);
       if (process.env.NODE_ENV !== "production" && err.response && err.response.data) {
