@@ -67,6 +67,7 @@ describe("createAuthMiddleware dev bypass safety", () => {
     const errors = [];
     const middleware = createAuthMiddleware({
       authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
       devBypass: () => true,
       logger: { error: (message) => errors.push(message) },
     });
@@ -84,6 +85,7 @@ describe("createAuthMiddleware dev bypass safety", () => {
     process.env.DEV_MODE = "true";
     const middleware = createAuthMiddleware({
       authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
       devBypass: () => true,
       logger: { error: () => {} },
     });
@@ -97,7 +99,10 @@ describe("createAuthMiddleware dev bypass safety", () => {
   test("allows the default bypass only in explicit development mode", async () => {
     process.env.NODE_ENV = "development";
     process.env.DEV_MODE = "true";
-    const middleware = createAuthMiddleware({ authApiUrl: "http://auth.test" });
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
+    });
 
     const result = await runMiddleware(middleware);
 
@@ -110,6 +115,7 @@ describe("createAuthMiddleware dev bypass safety", () => {
     process.env.DEV_MODE = "true";
     const middleware = createAuthMiddleware({
       authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
       devBypass: () => false,
     });
 
@@ -124,6 +130,7 @@ describe("createAuthMiddleware dev bypass safety", () => {
     axios.get = async () => ({ data: { id: "remote-user", role: "user" } });
     const middleware = createAuthMiddleware({
       authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
       devBypass: () => true,
     });
 
@@ -147,10 +154,14 @@ describe("createAuthMiddleware app authorization", () => {
     restoreEnv("DEV_MODE", originalEnv.DEV_MODE);
   });
 
-  test("rejects an explicitly empty appAccessKey", () => {
+  test("requires a non-empty appAccessKey", () => {
+    assert.throws(
+      () => createAuthMiddleware({ authApiUrl: "http://auth.test" }),
+      /appAccessKey.*povinný neprázdný string/
+    );
     assert.throws(
       () => createAuthMiddleware({ authApiUrl: "http://auth.test", appAccessKey: "  " }),
-      /appAccessKey.*neprázdný string/
+      /appAccessKey.*povinný neprázdný string/
     );
   });
 
@@ -233,5 +244,94 @@ describe("createAuthMiddleware app authorization", () => {
 
     assert.equal(result.nextCalled, false);
     assert.equal(result.res.statusCode, 403);
+  });
+});
+
+describe("createAuthMiddleware status contract", () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = "production";
+    delete process.env.DEV_MODE;
+    axios.get = originalAxiosGet;
+  });
+
+  afterEach(() => {
+    axios.get = originalAxiosGet;
+    restoreEnv("NODE_ENV", originalEnv.NODE_ENV);
+    restoreEnv("DEV_MODE", originalEnv.DEV_MODE);
+  });
+
+  test("returns 401 for a missing or malformed bearer token", async () => {
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
+    });
+
+    const missing = await runMiddleware(middleware);
+    const malformed = await runMiddleware(middleware, "not-a-bearer-token");
+
+    assert.equal(missing.res.statusCode, 401);
+    assert.deepEqual(missing.res.body, { error: "Unauthorized" });
+    assert.equal(malformed.res.statusCode, 401);
+    assert.deepEqual(malformed.res.body, { error: "Unauthorized" });
+  });
+
+  test("preserves upstream 401 and 403 responses", async () => {
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
+    });
+
+    axios.get = async () => {
+      const error = new Error("unauthorized");
+      error.response = { status: 401 };
+      throw error;
+    };
+    const unauthorized = await runMiddleware(middleware, "Bearer token");
+
+    axios.get = async () => {
+      const error = new Error("forbidden");
+      error.response = { status: 403 };
+      throw error;
+    };
+    const forbidden = await runMiddleware(middleware, "Bearer token");
+
+    assert.equal(unauthorized.res.statusCode, 401);
+    assert.deepEqual(unauthorized.res.body, { error: "Unauthorized" });
+    assert.equal(forbidden.res.statusCode, 403);
+    assert.deepEqual(forbidden.res.body, { error: "Forbidden" });
+  });
+
+  test("returns 503 for auth-app timeout, 5xx or a broken response contract", async () => {
+    const errors = [];
+    const middleware = createAuthMiddleware({
+      authApiUrl: "http://auth.test",
+      appAccessKey: "test-app",
+      logger: { error: (...args) => errors.push(args) },
+    });
+
+    axios.get = async () => {
+      const error = new Error("timeout");
+      error.code = "ECONNABORTED";
+      throw error;
+    };
+    const timeout = await runMiddleware(middleware, "Bearer token");
+
+    axios.get = async () => {
+      const error = new Error("upstream failed");
+      error.response = { status: 500 };
+      throw error;
+    };
+    const upstreamFailure = await runMiddleware(middleware, "Bearer token");
+
+    axios.get = async () => ({ data: null });
+    const invalidPayload = await runMiddleware(middleware, "Bearer token");
+
+    assert.equal(timeout.res.statusCode, 503);
+    assert.deepEqual(timeout.res.body, { error: "Authentication service unavailable" });
+    assert.equal(upstreamFailure.res.statusCode, 503);
+    assert.deepEqual(upstreamFailure.res.body, { error: "Authentication service unavailable" });
+    assert.equal(invalidPayload.res.statusCode, 503);
+    assert.deepEqual(invalidPayload.res.body, { error: "Authentication service unavailable" });
+    assert.equal(errors.length, 3);
   });
 });

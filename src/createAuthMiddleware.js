@@ -10,7 +10,7 @@ const axios = require("axios");
  *        Bypass je vždy povolen pouze při NODE_ENV === "development".
  *        Bez callbacku se navíc vyžaduje DEV_MODE === "true".
  *  - devUser (object | undefined) – co se dá do req.user v DEV režimu
- *  - appAccessKey (string | undefined) – klíč aplikace vyžadovaný v allowedApps
+ *  - appAccessKey (string, povinné) – klíč aplikace vyžadovaný v allowedApps
  *  - timeoutMs (number | undefined) – timeout HTTP požadavku, default 5000
  *  - logger (object | undefined) – { info, error } – volitelné logování
  */
@@ -28,10 +28,9 @@ function createAuthMiddleware(options = {}) {
     throw new Error("createAuthMiddleware: 'authApiUrl' je povinné.");
   }
 
-  const hasAppAccessKey = Object.prototype.hasOwnProperty.call(options, "appAccessKey");
   const requiredApp = typeof appAccessKey === "string" ? appAccessKey.trim() : "";
-  if (hasAppAccessKey && !requiredApp) {
-    throw new Error("createAuthMiddleware: 'appAccessKey' musí být neprázdný string.");
+  if (!requiredApp) {
+    throw new Error("createAuthMiddleware: 'appAccessKey' je povinný neprázdný string.");
   }
 
   let blockedBypassLogged = false;
@@ -63,8 +62,6 @@ function createAuthMiddleware(options = {}) {
     devUser || { id: "dev-user", role: "admin", status: "active" };
 
   const continueIfAppAllowed = (req, res, next) => {
-    if (!requiredApp) return next();
-
     const allowedApps = req.user?.allowedApps ?? req.user?.allowed_apps;
     if (allowedApps == null) return next();
 
@@ -85,7 +82,7 @@ function createAuthMiddleware(options = {}) {
 
       // 2) Token z hlavičky
       const token = req.headers.authorization;
-      if (!token) {
+      if (typeof token !== "string" || !/^Bearer\s+\S+$/i.test(token.trim())) {
         return res.status(401).json({ error: "Unauthorized" });
       }
 
@@ -97,15 +94,25 @@ function createAuthMiddleware(options = {}) {
         timeout: timeoutMs,
       });
 
-      // očekáváme, že auth-app vrací payload usera v body
+      // Neplatný upstream kontrakt je nedostupná autentizační služba, ne
+      // neplatný klientský token. Klient tak může bezpečně odlišit retry stav.
+      if (!response.data || typeof response.data !== "object" || Array.isArray(response.data)) {
+        throw new Error("Auth service returned an invalid user payload");
+      }
+
       req.user = response.data;
       return continueIfAppAllowed(req, res, next);
     } catch (err) {
-      logger.error("Auth error při ověřování tokenu:", err.message);
-      if (process.env.NODE_ENV !== "production" && err.response && err.response.data) {
-        logger.error("Response data:", err.response.data);
+      const upstreamStatus = Number(err.response?.status);
+      if (upstreamStatus === 401) {
+        return res.status(401).json({ error: "Unauthorized" });
       }
-      return res.status(401).json({ error: "Invalid token" });
+      if (upstreamStatus === 403) {
+        return res.status(403).json({ error: "Forbidden" });
+      }
+
+      logger.error("Auth service unavailable:", err.message);
+      return res.status(503).json({ error: "Authentication service unavailable" });
     }
   };
 }
